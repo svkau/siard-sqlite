@@ -8,10 +8,12 @@ import zipfile
 import sqlite3
 import tempfile
 import shutil
+import re
 from pathlib import Path
 from lxml import etree
 from typing import Dict, List, Optional, Tuple
 import logging
+from contextlib import contextmanager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -19,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 class SiardToSqlite:
     """Converts SIARD files to SQLite databases."""
+
+    # Configuration constants
+    STREAMING_THRESHOLD_MB = 50
+    BATCH_SIZE = 1000
+    PROGRESS_INTERVAL = 10000
 
     # Simplified datatype mapping for analysis purposes
     TYPE_MAPPING = {
@@ -54,6 +61,23 @@ class SiardToSqlite:
         self.temp_dir = None
         self.metadata = None
         self.schemas = []
+        
+        # Validate input
+        self._validate_input()
+
+    def _validate_input(self):
+        """Validate input file paths and requirements."""
+        if not self.siard_path.exists():
+            raise FileNotFoundError(f"SIARD file not found: {self.siard_path}")
+        
+        if not self.siard_path.suffix.lower() == '.siard':
+            raise ValueError(f"Input file must have .siard extension: {self.siard_path}")
+        
+        if self.sqlite_path.exists():
+            logger.warning(f"Output file already exists and will be overwritten: {self.sqlite_path}")
+        
+        # Create parent directory if it doesn't exist
+        self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
 
     def convert(self):
         """Main conversion process."""
@@ -120,13 +144,13 @@ class SiardToSqlite:
 
     def _parse_schema(self, schema_elem, nsmap: Dict, ns_prefix: str) -> Optional[Dict]:
         """Parse a single schema element."""
-        logger.info(f"Parsing schema element: {schema_elem.tag}")
-        logger.info(f"Schema element children: {[child.tag for child in schema_elem]}")
+        logger.debug(f"Parsing schema element: {schema_elem.tag}")
+        logger.debug(f"Schema element children: {[child.tag for child in schema_elem]}")
 
         # Debug: show all text content in schema element
         for child in schema_elem:
             if child.text and child.text.strip():
-                logger.info(f"  {child.tag}: {child.text.strip()}")
+                logger.debug(f"  {child.tag}: {child.text.strip()}")
 
         schema_name = self._get_element_text(schema_elem, f'{ns_prefix}n', nsmap)
         if not schema_name:
@@ -153,23 +177,8 @@ class SiardToSqlite:
             'tables': []
         }
 
-        # Parse tables - try both with and without namespace
-        table_xpath_options = [
-            f'.//{ns_prefix}table',
-            './/table',
-            './/*[local-name()="table"]'
-        ]
-
-        tables_found = []
-        for xpath in table_xpath_options:
-            try:
-                tables = schema_elem.xpath(xpath, namespaces=nsmap if nsmap else None)
-                if tables:
-                    tables_found = tables
-                    logger.info(f"Found {len(tables)} tables using xpath: {xpath}")
-                    break
-            except Exception as e:
-                logger.debug(f"XPath {xpath} failed: {e}")
+        # Parse tables
+        tables_found = self._find_elements_by_xpath(schema_elem, 'table', nsmap, ns_prefix)
 
         if not tables_found:
             logger.warning("No tables found in schema")
@@ -183,7 +192,7 @@ class SiardToSqlite:
         logger.info(f"Schema {schema_name} contains {len(schema_info['tables'])} tables")
         return schema_info
 
-    def _parse_table(self, table_elem, nsmap: Dict, ns_prefix: str, table_index: int = None) -> Optional[Dict]:
+    def _parse_table(self, table_elem, nsmap: Dict, ns_prefix: str, table_index: int = 1) -> Optional[Dict]:
         """Parse a single table element."""
         table_name = self._get_element_text(table_elem, f'{ns_prefix}n', nsmap)
         if not table_name:
@@ -203,23 +212,8 @@ class SiardToSqlite:
             'table_index': table_index
         }
 
-        # Parse columns - try multiple XPath approaches
-        column_xpath_options = [
-            f'.//{ns_prefix}column',
-            './/column',
-            './/*[local-name()="column"]'
-        ]
-
-        columns_found = []
-        for xpath in column_xpath_options:
-            try:
-                columns = table_elem.xpath(xpath, namespaces=nsmap if nsmap else None)
-                if columns:
-                    columns_found = columns
-                    logger.info(f"Found {len(columns)} columns using xpath: {xpath}")
-                    break
-            except Exception as e:
-                logger.debug(f"Column XPath {xpath} failed: {e}")
+        # Parse columns
+        columns_found = self._find_elements_by_xpath(table_elem, 'column', nsmap, ns_prefix)
 
         if not columns_found:
             logger.warning(f"No columns found for table {table_name}")
@@ -238,38 +232,16 @@ class SiardToSqlite:
             f"Table {table_name} has {len(table_info['columns'])} columns: {[c['name'] for c in table_info['columns']]}")
 
         # Parse primary key
-        pk_xpath_options = [
-            f'.//{ns_prefix}primaryKey',
-            './/primaryKey',
-            './/*[local-name()="primaryKey"]'
-        ]
-
-        for xpath in pk_xpath_options:
-            try:
-                pk_elems = table_elem.xpath(xpath, namespaces=nsmap if nsmap else None)
-                if pk_elems:
-                    # Try to find column references in primary key
-                    pk_column_xpath_options = [
-                        f'.//{ns_prefix}column',
-                        './/column',
-                        './/*[local-name()="column"]'
-                    ]
-
-                    for pk_elem in pk_elems:
-                        for col_xpath in pk_column_xpath_options:
-                            try:
-                                column_elems = pk_elem.xpath(col_xpath, namespaces=nsmap if nsmap else None)
-                                for column_elem in column_elems:
-                                    pk_column = self._get_element_text(column_elem, '.', nsmap)
-                                    if pk_column:
-                                        table_info['primary_key'].append(self._sanitize_name(pk_column))
-                                if table_info['primary_key']:
-                                    break
-                            except Exception as e:
-                                logger.debug(f"PK column XPath {col_xpath} failed: {e}")
+        pk_elems = self._find_elements_by_xpath(table_elem, 'primaryKey', nsmap, ns_prefix)
+        if pk_elems:
+            for pk_elem in pk_elems:
+                column_elems = self._find_elements_by_xpath(pk_elem, 'column', nsmap, ns_prefix)
+                for column_elem in column_elems:
+                    pk_column = self._get_element_text(column_elem, '.', nsmap)
+                    if pk_column:
+                        table_info['primary_key'].append(self._sanitize_name(pk_column))
+                if table_info['primary_key']:
                     break
-            except Exception as e:
-                logger.debug(f"PK XPath {xpath} failed: {e}")
 
         # Parse foreign keys (simplified) - skip for now to focus on main issue
 
@@ -383,15 +355,43 @@ class SiardToSqlite:
 
         return None
 
+    def _find_elements_by_xpath(self, parent_elem, element_name: str, nsmap: Dict, ns_prefix: str) -> List:
+        """Find elements using multiple XPath strategies with fallbacks."""
+        xpath_options = [
+            f'.//{ns_prefix}{element_name}',
+            f'.//{element_name}',
+            f'.//*[local-name()="{element_name}"]'
+        ]
+        
+        for xpath in xpath_options:
+            try:
+                elements = parent_elem.xpath(xpath, namespaces=nsmap if nsmap else None)
+                if elements:
+                    logger.debug(f"Found {len(elements)} {element_name} elements using xpath: {xpath}")
+                    return elements
+            except Exception as e:
+                logger.debug(f"XPath {xpath} failed: {e}")
+        
+        logger.warning(f"No {element_name} elements found")
+        return []
+
     def _sanitize_name(self, name: str) -> str:
         """Sanitize table/column names for SQLite."""
         # Remove problematic characters, keep it simple
-        import re
         sanitized = re.sub(r'[^\w]', '_', name)
         # Ensure it doesn't start with a number
         if sanitized and sanitized[0].isdigit():
             sanitized = f"col_{sanitized}"
         return sanitized or "unnamed"
+
+    @contextmanager
+    def _sqlite_connection(self):
+        """Context manager for SQLite database connections."""
+        conn = sqlite3.connect(self.sqlite_path)
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _create_sqlite_database(self):
         """Create SQLite database with schema."""
@@ -411,10 +411,9 @@ class SiardToSqlite:
         if self.sqlite_path.exists():
             self.sqlite_path.unlink()
 
-        conn = sqlite3.connect(self.sqlite_path)
-        cursor = conn.cursor()
-
-        try:
+        with self._sqlite_connection() as conn:
+            cursor = conn.cursor()
+            
             # Enable foreign keys
             cursor.execute("PRAGMA foreign_keys = ON")
 
@@ -430,9 +429,6 @@ class SiardToSqlite:
 
             conn.commit()
             logger.info(f"Successfully created {tables_created} tables")
-
-        finally:
-            conn.close()
 
     def _create_table(self, cursor, table_info: Dict):
         """Create a single table in SQLite."""
@@ -459,17 +455,16 @@ class SiardToSqlite:
 
         # Create table
         create_sql = f"CREATE TABLE {table_name} (\n  {',\n  '.join(column_defs)}\n)"
-        logger.info(f"SQL: {create_sql}")
+        logger.debug(f"SQL: {create_sql}")
         cursor.execute(create_sql)
 
     def _import_data(self):
         """Import data from SIARD XML files."""
         logger.info("Importing data")
 
-        conn = sqlite3.connect(self.sqlite_path)
-        cursor = conn.cursor()
-
-        try:
+        with self._sqlite_connection() as conn:
+            cursor = conn.cursor()
+            
             for schema_index, schema in enumerate(self.schemas):
                 # Try the folder name specified in metadata first, then fallbacks
                 possible_schema_folders = [
@@ -494,16 +489,14 @@ class SiardToSqlite:
 
             conn.commit()
 
-        finally:
-            conn.close()
-
     def _import_table_data(self, cursor, table_info: Dict, schema_folder: Path):
         """Import data for a single table."""
         table_name = table_info['name']
         # Try both possible file naming conventions - generic names first (most common)
+        table_index = table_info.get('table_index', 1)
         possible_files = [
-            schema_folder / f"table{table_info.get('table_index', 1)}" / f"table{table_info.get('table_index', 1)}.xml",
-            schema_folder / f"table{table_info.get('table_index', 1)}.xml",
+            schema_folder / f"table{table_index}" / f"table{table_index}.xml",
+            schema_folder / f"table{table_index}.xml",
             schema_folder / f"{table_name}.xml",
             schema_folder / f"{table_name}" / f"{table_name}.xml"
         ]
@@ -524,7 +517,7 @@ class SiardToSqlite:
         try:
             # Check file size first
             file_size = table_file.stat().st_size
-            use_streaming = file_size > 50 * 1024 * 1024  # 50MB threshold
+            use_streaming = file_size > self.STREAMING_THRESHOLD_MB * 1024 * 1024
             
             if use_streaming:
                 logger.info(f"Large file detected ({file_size / 1024 / 1024:.1f}MB), using streaming parser")
@@ -534,8 +527,8 @@ class SiardToSqlite:
             tree = etree.parse(str(table_file))
             root = tree.getroot()
 
-            logger.info(f"Root element: {root.tag}")
-            logger.info(f"Namespaces: {root.nsmap}")
+            logger.debug(f"Root element: {root.tag}")
+            logger.debug(f"Namespaces: {root.nsmap}")
 
             # Handle namespaces in data XML - use local-name() to ignore namespaces
             # This is more robust than trying to manage namespace prefixes
@@ -545,11 +538,11 @@ class SiardToSqlite:
             placeholders = ', '.join(['?' for _ in column_names])
             insert_sql = f"INSERT INTO {table_name} ({', '.join(column_names)}) VALUES ({placeholders})"
 
-            logger.info(f"SQL: {insert_sql}")
+            logger.debug(f"SQL: {insert_sql}")
 
             # Use local-name() to find rows regardless of namespace
             rows = root.xpath('.//*[local-name()="row"]')
-            logger.info(f"Found {len(rows)} rows using local-name xpath")
+            logger.debug(f"Found {len(rows)} rows using local-name xpath")
 
             # Process each row
             rows_imported = 0
@@ -604,14 +597,14 @@ class SiardToSqlite:
                     rows_imported += 1
 
                     if rows_imported <= 3:  # Log first few rows for debugging
-                        logger.info(f"Row {rows_imported}: {row_data}")
+                        logger.debug(f"Row {rows_imported}: {row_data}")
 
                 except Exception as e:
                     logger.error(f"Error inserting row {rows_imported + 1}: {e}")
                     logger.error(f"Row data: {row_data}")
 
-                if rows_imported % 1000 == 0 and rows_imported > 0:
-                    logger.info(f"Imported {rows_imported} rows for {table_name}")
+                if rows_imported % self.PROGRESS_INTERVAL == 0 and rows_imported > 0:
+                    logger.debug(f"Imported {rows_imported} rows for {table_name}")
 
             logger.info(f"Completed import for {table_name}: {rows_imported} rows")
 
@@ -629,10 +622,9 @@ class SiardToSqlite:
         placeholders = ', '.join(['?' for _ in column_names])
         insert_sql = f"INSERT INTO {table_name} ({', '.join(column_names)}) VALUES ({placeholders})"
         
-        logger.info(f"SQL: {insert_sql}")
+        logger.debug(f"SQL: {insert_sql}")
         
         rows_imported = 0
-        batch_size = 1000
         batch_data = []
         
         try:
@@ -695,14 +687,14 @@ class SiardToSqlite:
                     batch_data.append(row_data)
                     
                     # Insert batch when full
-                    if len(batch_data) >= batch_size:
+                    if len(batch_data) >= self.BATCH_SIZE:
                         try:
                             cursor.executemany(insert_sql, batch_data)
                             rows_imported += len(batch_data)
                             batch_data = []
                             
-                            if rows_imported % 10000 == 0:
-                                logger.info(f"Imported {rows_imported} rows for {table_name}")
+                            if rows_imported % self.PROGRESS_INTERVAL == 0:
+                                logger.debug(f"Imported {rows_imported} rows for {table_name}")
                         except Exception as e:
                             logger.error(f"Error inserting batch at row {rows_imported}: {e}")
                             break
