@@ -263,7 +263,16 @@ class SiardToSqlite:
             nullable = self._get_element_text(column_elem, 'nullable', nsmap)
 
         if not column_name or not column_type:
-            logger.warning(f"Missing column name or type: name={column_name}, type={column_type}")
+            # Enhanced debugging for missing column data (common in SIARD files with placeholder elements)
+            logger.debug(f"Skipping empty column element: name={column_name}, type={column_type}")
+            logger.debug(f"Column element tag: {column_elem.tag}")
+            logger.debug(f"Column element children: {[child.tag for child in column_elem]}")
+            logger.debug(f"Column element text content:")
+            for child in column_elem:
+                if child.text and child.text.strip():
+                    logger.debug(f"  {child.tag}: '{child.text.strip()}'")
+                else:
+                    logger.debug(f"  {child.tag}: <empty>")
             return None
 
         # Map SIARD type to SQLite type
