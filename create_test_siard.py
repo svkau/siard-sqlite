@@ -200,6 +200,80 @@ def create_metadata_xml():
           <rows>8</rows>
         </table>
       </tables>
+      
+      <views>
+        <!-- View för aktiva kunder -->
+        <view>
+          <name>active_customers</name>
+          <query>SELECT customer_id, name, email, created_date FROM customers WHERE is_active = true</query>
+          <description>Visa endast aktiva kunder</description>
+          <columns>
+            <column>
+              <name>customer_id</name>
+              <type>INTEGER</type>
+              <nullable>false</nullable>
+              <description>Unikt kund-ID</description>
+            </column>
+            <column>
+              <name>name</name>
+              <type>VARCHAR</type>
+              <typeLength>100</typeLength>
+              <nullable>false</nullable>
+              <description>Kundnamn</description>
+            </column>
+            <column>
+              <name>email</name>
+              <type>VARCHAR</type>
+              <typeLength>255</typeLength>
+              <nullable>true</nullable>
+              <description>E-postadress</description>
+            </column>
+            <column>
+              <name>created_date</name>
+              <type>DATE</type>
+              <nullable>false</nullable>
+              <description>Datum när kunden skapades</description>
+            </column>
+          </columns>
+        </view>
+        
+        <!-- View för order-sammanfattning -->
+        <view>
+          <name>order_summary</name>
+          <query>SELECT c.name, c.email, COUNT(o.order_id) as order_count, SUM(o.amount) as total_amount FROM customers c LEFT JOIN orders o ON c.customer_id = o.customer_id GROUP BY c.customer_id, c.name, c.email</query>
+          <description>Sammanfattning av beställningar per kund</description>
+          <columns>
+            <column>
+              <name>name</name>
+              <type>VARCHAR</type>
+              <typeLength>100</typeLength>
+              <nullable>false</nullable>
+              <description>Kundnamn</description>
+            </column>
+            <column>
+              <name>email</name>
+              <type>VARCHAR</type>
+              <typeLength>255</typeLength>
+              <nullable>true</nullable>
+              <description>E-postadress</description>
+            </column>
+            <column>
+              <name>order_count</name>
+              <type>INTEGER</type>
+              <nullable>false</nullable>
+              <description>Antal beställningar</description>
+            </column>
+            <column>
+              <name>total_amount</name>
+              <type>DECIMAL</type>
+              <typePrecision>10</typePrecision>
+              <typeScale>2</typeScale>
+              <nullable>true</nullable>
+              <description>Totalt belopp</description>
+            </column>
+          </columns>
+        </view>
+      </views>
     </schema>
   </schemas>
 </siardArchive>'''
@@ -376,9 +450,11 @@ if __name__ == "__main__":
     if success:
         print(f"\nTest-SIARD-filen '{args.output}' har skapats framgångsrikt!")
         print("\nInnehåller:")
-        print("- Schema 'schema1' med två tabeller:")
+        print("- Schema 'schema1' med två tabeller och två views:")
         print("  * customers (5 rader: kund-ID, namn, e-post, datum, aktiv)")
         print("  * orders (8 rader: order-ID, kund-ID, datum, belopp, status)")
+        print("  * active_customers (view: visar endast aktiva kunder)")
+        print("  * order_summary (view: sammanfattning av beställningar per kund)")
         print("- Foreign key-relation mellan orders.customer_id -> customers.customer_id")
         print(f"\nDu kan nu testa din konverterare med: python siard_converter.py {args.output} test.sqlite")
     else:

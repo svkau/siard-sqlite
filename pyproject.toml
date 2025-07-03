@@ -1,9 +1,17 @@
 [project]
 name = "siard-sqlite"
 version = "0.1.0"
-description = "Add your description here"
+description = "Convert SIARD files to SQLite databases"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "lxml>=6.0.0",
 ]
+
+[project.scripts]
+siard-convert = "siard_converter:main"
+siard2sqlite = "siard_converter:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build_meta"

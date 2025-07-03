@@ -174,7 +174,8 @@ class SiardToSqlite:
         schema_info = {
             'name': schema_name,
             'folder': schema_folder_name or schema_name,
-            'tables': []
+            'tables': [],
+            'views': []
         }
 
         # Parse tables
@@ -189,7 +190,14 @@ class SiardToSqlite:
             if table_info:
                 schema_info['tables'].append(table_info)
 
-        logger.info(f"Schema {schema_name} contains {len(schema_info['tables'])} tables")
+        # Parse views
+        views_found = self._find_elements_by_xpath(schema_elem, 'view', nsmap, ns_prefix)
+        for view_elem in views_found:
+            view_info = self._parse_view(view_elem, nsmap, ns_prefix)
+            if view_info:
+                schema_info['views'].append(view_info)
+
+        logger.info(f"Schema {schema_name} contains {len(schema_info['tables'])} tables and {len(schema_info['views'])} views")
         return schema_info
 
     def _parse_table(self, table_elem, nsmap: Dict, ns_prefix: str, table_index: int = 1) -> Optional[Dict]:
@@ -243,9 +251,56 @@ class SiardToSqlite:
                 if table_info['primary_key']:
                     break
 
-        # Parse foreign keys (simplified) - skip for now to focus on main issue
+        # Parse foreign keys
+        fk_elems = self._find_elements_by_xpath(table_elem, 'foreignKey', nsmap, ns_prefix)
+        for fk_elem in fk_elems:
+            fk_info = self._parse_foreign_key(fk_elem, nsmap, ns_prefix)
+            if fk_info:
+                table_info['foreign_keys'].append(fk_info)
 
         return table_info
+
+    def _parse_view(self, view_elem, nsmap: Dict, ns_prefix: str) -> Optional[Dict]:
+        """Parse a single view element."""
+        view_name = self._get_element_text(view_elem, f'{ns_prefix}n', nsmap)
+        if not view_name:
+            view_name = self._get_element_text(view_elem, 'n', nsmap)
+        if not view_name:
+            logger.error("Could not find view name")
+            return None
+
+        logger.info(f"Processing view: {view_name}")
+
+        # Get view query/definition - try both query and queryOriginal
+        query = self._get_element_text(view_elem, f'{ns_prefix}query', nsmap)
+        if not query:
+            query = self._get_element_text(view_elem, 'query', nsmap)
+        if not query:
+            query = self._get_element_text(view_elem, f'{ns_prefix}queryOriginal', nsmap)
+        if not query:
+            query = self._get_element_text(view_elem, 'queryOriginal', nsmap)
+        
+        # Get view description
+        description = self._get_element_text(view_elem, f'{ns_prefix}description', nsmap)
+        if not description:
+            description = self._get_element_text(view_elem, 'description', nsmap)
+
+        view_info = {
+            'name': self._sanitize_name(view_name),
+            'query': query,
+            'description': description,
+            'columns': []
+        }
+
+        # Parse view columns (similar to table columns)
+        columns_found = self._find_elements_by_xpath(view_elem, 'column', nsmap, ns_prefix)
+        for column_elem in columns_found:
+            column_info = self._parse_column(column_elem, nsmap, ns_prefix)
+            if column_info:
+                view_info['columns'].append(column_info)
+
+        logger.info(f"View {view_name} has {len(view_info['columns'])} columns")
+        return view_info
 
     def _parse_column(self, column_elem, nsmap: Dict, ns_prefix: str) -> Optional[Dict]:
         """Parse a single column element."""
@@ -289,16 +344,49 @@ class SiardToSqlite:
 
     def _parse_foreign_key(self, fk_elem, nsmap: Dict, ns_prefix: str) -> Optional[Dict]:
         """Parse foreign key information."""
-        # Simplified FK parsing - extend as needed
+        fk_name = self._get_element_text(fk_elem, f'{ns_prefix}n', nsmap)
+        if not fk_name:
+            fk_name = self._get_element_text(fk_elem, 'n', nsmap)
+        
         referenced_schema = self._get_element_text(fk_elem, f'{ns_prefix}referencedSchema', nsmap)
+        if not referenced_schema:
+            referenced_schema = self._get_element_text(fk_elem, 'referencedSchema', nsmap)
+            
         referenced_table = self._get_element_text(fk_elem, f'{ns_prefix}referencedTable', nsmap)
+        if not referenced_table:
+            referenced_table = self._get_element_text(fk_elem, 'referencedTable', nsmap)
 
-        if referenced_table:
-            return {
-                'referenced_table': self._sanitize_name(referenced_table),
-                'referenced_schema': referenced_schema
-            }
-        return None
+        if not referenced_table:
+            logger.debug("Foreign key missing referenced table")
+            return None
+
+        # Parse column references
+        source_columns = []
+        target_columns = []
+        
+        # Look for column references in foreign key
+        ref_elems = self._find_elements_by_xpath(fk_elem, 'reference', nsmap, ns_prefix)
+        for ref_elem in ref_elems:
+            source_col = self._get_element_text(ref_elem, f'{ns_prefix}column', nsmap)
+            if not source_col:
+                source_col = self._get_element_text(ref_elem, 'column', nsmap)
+            
+            target_col = self._get_element_text(ref_elem, f'{ns_prefix}referenced', nsmap)
+            if not target_col:
+                target_col = self._get_element_text(ref_elem, 'referenced', nsmap)
+            
+            if source_col:
+                source_columns.append(self._sanitize_name(source_col))
+            if target_col:
+                target_columns.append(self._sanitize_name(target_col))
+
+        return {
+            'name': self._sanitize_name(fk_name) if fk_name else None,
+            'referenced_table': self._sanitize_name(referenced_table),
+            'referenced_schema': referenced_schema,
+            'source_columns': source_columns,
+            'target_columns': target_columns
+        }
 
     def _get_element_text(self, parent_elem, xpath: str, nsmap: Dict) -> Optional[str]:
         """Get text content from XML element with robust fallback strategies."""
@@ -426,7 +514,7 @@ class SiardToSqlite:
             # Enable foreign keys
             cursor.execute("PRAGMA foreign_keys = ON")
 
-            # Create tables
+            # Create tables first (views may depend on them)
             tables_created = 0
             for schema in self.schemas:
                 for table in schema['tables']:
@@ -436,14 +524,25 @@ class SiardToSqlite:
                     except Exception as e:
                         logger.error(f"Failed to create table {table['name']}: {e}")
 
+            # Create views after tables
+            views_created = 0
+            for schema in self.schemas:
+                for view in schema['views']:
+                    try:
+                        self._create_view(cursor, view)
+                        views_created += 1
+                    except Exception as e:
+                        logger.error(f"Failed to create view {view['name']}: {e}")
+
             conn.commit()
-            logger.info(f"Successfully created {tables_created} tables")
+            logger.info(f"Successfully created {tables_created} tables and {views_created} views")
 
     def _create_table(self, cursor, table_info: Dict):
         """Create a single table in SQLite."""
         table_name = table_info['name']
         columns = table_info['columns']
         primary_key = table_info['primary_key']
+        foreign_keys = table_info['foreign_keys']
 
         logger.info(f"Creating table: {table_name}")
 
@@ -462,10 +561,88 @@ class SiardToSqlite:
             pk_cols = ", ".join(primary_key)
             column_defs.append(f"PRIMARY KEY ({pk_cols})")
 
+        # Add foreign key constraints
+        for fk in foreign_keys:
+            if fk['source_columns'] and fk['target_columns']:
+                source_cols = ", ".join(fk['source_columns'])
+                target_cols = ", ".join(fk['target_columns'])
+                fk_def = f"FOREIGN KEY ({source_cols}) REFERENCES {fk['referenced_table']} ({target_cols})"
+                column_defs.append(fk_def)
+                logger.debug(f"Added foreign key: {fk_def}")
+
         # Create table
         create_sql = f"CREATE TABLE {table_name} (\n  {',\n  '.join(column_defs)}\n)"
         logger.debug(f"SQL: {create_sql}")
         cursor.execute(create_sql)
+
+    def _create_view(self, cursor, view_info: Dict):
+        """Create a single view in SQLite."""
+        view_name = view_info['name']
+        query = view_info['query']
+
+        logger.info(f"Creating view: {view_name}")
+
+        if not query:
+            logger.warning(f"View {view_name} has no query definition, skipping")
+            return
+
+        # Basic SQL query cleanup for SQLite compatibility
+        sqlite_query = self._convert_query_to_sqlite(query)
+        
+        create_sql = f"CREATE VIEW {view_name} AS {sqlite_query}"
+        logger.debug(f"SQL: {create_sql}")
+        
+        try:
+            cursor.execute(create_sql)
+        except Exception as e:
+            logger.error(f"Failed to create view {view_name}: {e}")
+            logger.error(f"Original query: {query}")
+            logger.error(f"Converted query: {sqlite_query}")
+
+    def _convert_query_to_sqlite(self, query: str) -> str:
+        """Convert SIARD SQL query to SQLite-compatible format."""
+        if not query:
+            return query
+            
+        # Basic cleanup - remove common SQL differences
+        sqlite_query = query.strip()
+        
+        import re
+        
+        # Handle MySQL CREATE VIEW syntax - extract just the SELECT part
+        if sqlite_query.upper().startswith('CREATE'):
+            # Extract the SELECT statement from CREATE VIEW syntax
+            # Pattern: CREATE ... VIEW ... AS select_statement
+            view_match = re.search(r'VIEW\s+.*?\s+AS\s+(.+)', sqlite_query, re.IGNORECASE | re.DOTALL)
+            if view_match:
+                sqlite_query = view_match.group(1).strip()
+        
+        # Remove MySQL-specific syntax elements
+        sqlite_query = re.sub(r'\bALGORITHM=\w+\s+', '', sqlite_query, flags=re.IGNORECASE)
+        sqlite_query = re.sub(r'\bDEFINER=`[^`]+`@`[^`]+`\s+', '', sqlite_query, flags=re.IGNORECASE)
+        sqlite_query = re.sub(r'\bSQL\s+SECURITY\s+\w+\s+', '', sqlite_query, flags=re.IGNORECASE)
+        
+        # Remove backticks (MySQL table/column quotes) - SQLite uses double quotes if needed
+        sqlite_query = re.sub(r'`([^`]+)`', r'\1', sqlite_query)
+        
+        # Replace AS aliases that might conflict
+        sqlite_query = re.sub(r'\s+AS\s+(\w+)', r' AS \1', sqlite_query, flags=re.IGNORECASE)
+        
+        # Replace common SQL Server/Oracle syntax with SQLite equivalents
+        sqlite_query = re.sub(r'\bTOP\s+\d+\b', '', sqlite_query, flags=re.IGNORECASE)
+        
+        # Fix the LIMIT/OFFSET regex - it had incorrect group references
+        # This pattern looks for LIMIT num OFFSET num and swaps them
+        sqlite_query = re.sub(r'\bLIMIT\s+(\d+)\s+OFFSET\s+(\d+)\b', r'LIMIT \2 OFFSET \1', sqlite_query, flags=re.IGNORECASE)
+        
+        # Convert boolean literals to SQLite format
+        sqlite_query = re.sub(r'\btrue\b', '1', sqlite_query, flags=re.IGNORECASE)
+        sqlite_query = re.sub(r'\bfalse\b', '0', sqlite_query, flags=re.IGNORECASE)
+        
+        # Remove trailing semicolons
+        sqlite_query = sqlite_query.rstrip(';')
+        
+        return sqlite_query
 
     def _import_data(self):
         """Import data from SIARD XML files."""
@@ -738,22 +915,82 @@ class SiardToSqlite:
 def main():
     """Command line interface."""
     import argparse
+    import sys
 
-    parser = argparse.ArgumentParser(description='Convert SIARD files to SQLite')
+    parser = argparse.ArgumentParser(
+        description='Convert SIARD files to SQLite databases',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  siard-convert employees.siard employees.db
+  siard-convert --verbose data.siard output.sqlite
+  siard2sqlite --quiet archive.siard result.db
+
+For more information, visit: https://github.com/your-repo/siard-sqlite
+        """
+    )
+    
     parser.add_argument('siard_file', help='Path to SIARD file')
     parser.add_argument('sqlite_file', help='Output SQLite file path')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Verbose logging')
+    
+    # Logging options
+    log_group = parser.add_mutually_exclusive_group()
+    log_group.add_argument('-v', '--verbose', action='store_true', 
+                          help='Enable verbose logging (shows detailed progress)')
+    log_group.add_argument('-q', '--quiet', action='store_true',
+                          help='Suppress all output except errors')
+    
+    # Feature options
+    parser.add_argument('--no-foreign-keys', action='store_true',
+                       help='Skip creating foreign key constraints')
+    parser.add_argument('--no-views', action='store_true',
+                       help='Skip creating views')
+    parser.add_argument('--batch-size', type=int, default=1000,
+                       help='Batch size for data import (default: 1000)')
+    parser.add_argument('--streaming-threshold', type=int, default=50,
+                       help='File size threshold in MB for streaming parser (default: 50)')
+    
+    # Information options
+    parser.add_argument('--version', action='version', version='siard-sqlite 0.1.0')
 
     args = parser.parse_args()
 
-    if args.verbose:
+    # Configure logging
+    if args.quiet:
+        logging.getLogger().setLevel(logging.ERROR)
+    elif args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+    else:
+        logging.getLogger().setLevel(logging.INFO)
 
-    converter = SiardToSqlite(args.siard_file, args.sqlite_file)
-    converter.convert()
+    try:
+        converter = SiardToSqlite(args.siard_file, args.sqlite_file)
+        
+        # Apply command line options
+        if hasattr(converter, 'BATCH_SIZE'):
+            converter.BATCH_SIZE = args.batch_size
+        if hasattr(converter, 'STREAMING_THRESHOLD_MB'):
+            converter.STREAMING_THRESHOLD_MB = args.streaming_threshold
+            
+        converter.convert()
 
-    print(f"Conversion completed: {args.sqlite_file}")
-    print(f"You can now explore the data with: datasette {args.sqlite_file}")
+        if not args.quiet:
+            print(f"✅ Conversion completed: {args.sqlite_file}")
+            print(f"📊 You can explore the data with: datasette {args.sqlite_file}")
+            
+    except FileNotFoundError as e:
+        print(f"❌ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"❌ Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        else:
+            print(f"❌ Conversion failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':

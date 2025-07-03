@@ -8,12 +8,14 @@ SIARD files are ZIP archives containing database structure metadata (XML) and da
 
 ## Features
 
-- **Complete schema conversion** - Tables, columns, data types, primary keys
+- **Complete schema conversion** - Tables, columns, data types, primary keys, and foreign keys
+- **Views support** - Converts SIARD views to SQLite views with query translation
 - **Robust XML parsing** - Handles various namespace configurations and SIARD versions
 - **Streaming support** - Efficiently processes large files (>50MB) using streaming XML parser
 - **Type mapping** - Automatic conversion from SIARD SQL types to SQLite types
 - **Batch processing** - Optimized data import with configurable batch sizes
 - **Progress monitoring** - Real-time import progress for large datasets
+- **Professional CLI** - Multiple command options and user-friendly interface
 - **Error handling** - Comprehensive error reporting and recovery
 
 ## Installation
@@ -44,13 +46,18 @@ source .venv/bin/activate  # Linux/macOS
 ### Basic Usage
 
 ```bash
-# Convert a SIARD file to SQLite
-python siard_converter.py input.siard output.sqlite
+# Using the CLI commands (recommended)
+siard-convert input.siard output.sqlite
+siard2sqlite input.siard output.sqlite
 
 # With verbose logging
-python siard_converter.py input.siard output.sqlite -v
+siard-convert --verbose input.siard output.sqlite
 
-# Using uv run (recommended)
+# Quiet mode (only errors)
+siard-convert --quiet input.siard output.sqlite
+
+# Traditional Python script method
+python siard_converter.py input.siard output.sqlite
 uv run siard_converter.py input.siard output.sqlite
 ```
 
@@ -58,23 +65,35 @@ uv run siard_converter.py input.siard output.sqlite
 
 ```
 positional arguments:
-  siard_file     Path to SIARD file
-  sqlite_file    Output SQLite file path
+  siard_file            Path to SIARD file
+  sqlite_file           Output SQLite file path
 
 options:
-  -h, --help     Show help message and exit
-  -v, --verbose  Enable verbose logging (shows detailed progress and debug info)
+  -h, --help            Show help message and exit
+  -v, --verbose         Enable verbose logging (shows detailed progress)
+  -q, --quiet           Suppress all output except errors
+  --no-foreign-keys     Skip creating foreign key constraints
+  --no-views            Skip creating views
+  --batch-size SIZE     Batch size for data import (default: 1000)
+  --streaming-threshold MB
+                        File size threshold in MB for streaming parser (default: 50)
+  --version             Show program version and exit
 ```
 
-### Example
+### Examples
 
 ```bash
-# Convert employees SIARD file
-uv run siard_converter.py /path/to/employees.siard employees.db
+# Basic conversion
+siard-convert employees.siard employees.db
+
+# Advanced conversion with custom settings
+siard-convert --verbose --batch-size 5000 --streaming-threshold 100 large_data.siard output.db
+
+# Skip foreign keys and views for faster conversion
+siard-convert --no-foreign-keys --no-views --quiet archive.siard simple.db
 
 # Explore the converted data
 datasette employees.db
-# or
 sqlite3 employees.db "SELECT COUNT(*) FROM employees;"
 ```
 
