@@ -8,38 +8,44 @@ SIARD files are ZIP archives containing database structure metadata (XML) and da
 
 ## Features
 
-- **Complete schema conversion** - Tables, columns, data types, primary keys, and foreign keys
+- **Schema conversion** - Tables, columns, data types, primary keys, and foreign keys
 - **Views support** - Converts SIARD views to SQLite views with query translation
-- **Robust XML parsing** - Handles various namespace configurations and SIARD versions
-- **Streaming support** - Efficiently processes large files (>50MB) using streaming XML parser
-- **Type mapping** - Automatic conversion from SIARD SQL types to SQLite types
+- **Streaming support** - Processes large files (>50MB) using streaming XML parser
+- **Type mapping** - Conversion from SIARD SQL types to SQLite types
 - **Batch processing** - Optimized data import with configurable batch sizes
-- **Progress monitoring** - Real-time import progress for large datasets
-- **Professional CLI** - Multiple command options and user-friendly interface
+- **Progress monitoring** - Real-time import progress for large datasets (not implemented)
+- **CLI** - Multiple command options
 - **Error handling** - Comprehensive error reporting and recovery
 
 ## Installation
 
-### Prerequisites
+### From PyPI (Recommended)
 
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/) for dependency management
+```bash
+# Install with pip
+pip install siard-sqlite
 
-### Setup
+# Or with uv (faster)
+uv add siard-sqlite
+```
+
+### From Source
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/svkau/siard-sqlite.git
 cd siard-sqlite
 
-# Install dependencies
+# Install with uv
 uv sync
 
-# Activate the virtual environment
-source .venv/bin/activate  # Linux/macOS
-# or
-.venv\Scripts\activate     # Windows
+# Or with pip
+pip install -e .
 ```
+
+### Prerequisites
+
+- Python 3.12+
 
 ## Usage
 
@@ -109,7 +115,7 @@ SIARD archives contain:
 ### Core Components
 
 - **`SiardToSqlite`** - Main converter class handling the complete conversion pipeline
-- **Metadata Parser** - Robust XML parsing with namespace fallback strategies  
+- **Metadata Parser** - XML parsing with namespace fallback strategies  
 - **Type Mapper** - Converts SIARD SQL types to appropriate SQLite types
 - **Data Importer** - Handles both regular and streaming XML parsing for optimal performance
 
